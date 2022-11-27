@@ -3,6 +3,8 @@ import { createClient } from "redis";
 import { MongoClient } from "mongodb";
 import { CalculatorWorker } from "./workers/calculator-worker/calculator-worker";
 import { DBWorker } from "./workers/db-worker/db-worker";
+import { TransportWorker } from "./workers/transport-worker/transport-worker";
+import { delay } from "./helpers/delay";
 
 const DBNAME = "indicators";
 const QUEUE = "indicators";
@@ -12,6 +14,12 @@ let redis_connected = false;
 let rabbitMQConnection;
 let rabbitMQChannel;
 let db;
+
+type IndicatorsQueueMsg = {
+  timeframe: string;
+  pair: string;
+  klines: any;
+};
 
 const redis_client = createClient({
   url: "redis://redis"
@@ -24,10 +32,7 @@ const mongo_client = new MongoClient(url);
 const calculatorWorker = new CalculatorWorker();
 const dbWorker = new DBWorker("indicators");
 
-async function delay(ms) {
-  // return await for better async stack trace support in case of errors.
-  return await new Promise((resolve) => setTimeout(resolve, ms));
-}
+const transportWorker = new TransportWorker();
 
 const connectRedis = async () => {
   console.log("Starting Redis connection...");
@@ -44,24 +49,24 @@ const connectRedis = async () => {
   }
 };
 
-const connectRabbit = async () => {
-  console.log("Starting Rabbit connection...");
-  let attempt = 1;
-  while (!rabbit_connected) {
-    console.log(`Trying to connect to RabbitMQ. Attempt ${attempt}`);
-    try {
-      rabbitMQConnection = await amqp.connect("amqp://guest:guest@rabbit:5672");
-      rabbitMQChannel = await rabbitMQConnection.createChannel();
-      // await rabbitMQChannel.assertQueue("indicators", { durable: false });
-      rabbit_connected = true;
-      console.log("Rabbit Connectedto indicators queue!!");
-    } catch {
-      console.log("Error on connecting Rabbit. Retrying...");
-      await delay(5000);
-    }
-    attempt++;
-  }
-};
+// const connectRabbit = async () => {
+//   console.log("Starting Rabbit connection...");
+//   let attempt = 1;
+//   while (!rabbit_connected) {
+//     console.log(`Trying to connect to RabbitMQ. Attempt ${attempt}`);
+//     try {
+//       rabbitMQConnection = await amqp.connect("amqp://guest:guest@rabbit:5672");
+//       rabbitMQChannel = await rabbitMQConnection.createChannel();
+//       // await rabbitMQChannel.assertQueue("indicators", { durable: false });
+//       rabbit_connected = true;
+//       console.log("Rabbit Connectedto indicators queue!!");
+//     } catch {
+//       console.log("Error on connecting Rabbit. Retrying...");
+//       await delay(5000);
+//     }
+//     attempt++;
+//   }
+// };
 
 async function connectMongo() {
   // Use connect method to connect to the server
@@ -71,27 +76,41 @@ async function connectMongo() {
   return "done.";
 }
 
-async function calcFactory(klines) {
-  const macd = await calculatorWorker.macd(klines);
-  return { macd };
+async function createIndicators(klines) {
+  const lastUpdate = klines[klines.length - 1][4];
+  const time_: string[] = [];
+  const close: number[] = [];
+  klines.map((t: number[]) => {
+    time_.push(new Date(t[0]).toLocaleString());
+    close.push(t[4]);
+    // let [time, open, high, low, close, volume, closeTime, assetVolume, trades, buyBaseVolume, buyAssetVolume, ignored] = t;
+    return t;
+  });
+  const macd = await calculatorWorker.macd(close);
+  const sma = await calculatorWorker.sma(close);
+  return { time_, close, macd, sma };
 }
 
 const readIndicatorsQueue = () => {
-  rabbitMQChannel.consume(
-    QUEUE,
-    async function (msg) {
-      const { pair, timeframe, klines } = JSON.parse(msg.content.toString());
-      const indicators = await calcFactory(klines);
-      dbWorker.saveIndicators(timeframe, pair, indicators);
-    },
-    {
-      noAck: true
-    }
-  );
+  transportWorker.consume(QUEUE, async function (msg) {
+    const { pair, timeframe, klines } = JSON.parse(
+      msg.content.toString()
+    ) as IndicatorsQueueMsg;
+    console.log("INDICATOR MSG", pair, timeframe);
+    const indicators = await createIndicators(klines);
+    const { time_, close, macd, sma } = indicators;
+    transportWorker.sendToQueue("signals", {
+      pair,
+      timeframe,
+      ...indicators
+    });
+    dbWorker.saveIndicators(timeframe, pair, indicators);
+  });
 };
 
 (async () => {
-  await connectRabbit();
+  // await connectRabbit();
+  await transportWorker.connect();
   await connectRedis();
   await connectMongo();
   readIndicatorsQueue();

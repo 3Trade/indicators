@@ -1,3 +1,7 @@
+import {
+  MacdSpecification,
+  SmaSpecification
+} from "./workers/indicator-worker/indicator-worker";
 import amqp from "amqplib";
 import { createClient } from "redis";
 import { MongoClient } from "mongodb";
@@ -5,20 +9,19 @@ import { CalculatorWorker } from "./workers/calculator-worker/calculator-worker"
 import { DBWorker } from "./workers/db-worker/db-worker";
 import { TransportWorker } from "./workers/transport-worker/transport-worker";
 import { delay } from "./helpers/delay";
+import { IndicatorsWorker } from "./workers/klines-worker/klines-worker";
+import { BinanceKline } from "./models/binance-kline";
 
 const DBNAME = "indicators";
 const QUEUE = "indicators";
 
-let rabbit_connected = false;
 let redis_connected = false;
-let rabbitMQConnection;
-let rabbitMQChannel;
 let db;
 
 type IndicatorsQueueMsg = {
   timeframe: string;
   pair: string;
-  klines: any;
+  klines: BinanceKline[];
 };
 
 const redis_client = createClient({
@@ -49,25 +52,6 @@ const connectRedis = async () => {
   }
 };
 
-// const connectRabbit = async () => {
-//   console.log("Starting Rabbit connection...");
-//   let attempt = 1;
-//   while (!rabbit_connected) {
-//     console.log(`Trying to connect to RabbitMQ. Attempt ${attempt}`);
-//     try {
-//       rabbitMQConnection = await amqp.connect("amqp://guest:guest@rabbit:5672");
-//       rabbitMQChannel = await rabbitMQConnection.createChannel();
-//       // await rabbitMQChannel.assertQueue("indicators", { durable: false });
-//       rabbit_connected = true;
-//       console.log("Rabbit Connectedto indicators queue!!");
-//     } catch {
-//       console.log("Error on connecting Rabbit. Retrying...");
-//       await delay(5000);
-//     }
-//     attempt++;
-//   }
-// };
-
 async function connectMongo() {
   // Use connect method to connect to the server
   await mongo_client.connect();
@@ -76,13 +60,13 @@ async function connectMongo() {
   return "done.";
 }
 
-async function createIndicators(klines) {
+async function createIndicators(klines: BinanceKline[]) {
   const lastUpdate = klines[klines.length - 1][4];
   const time_: string[] = [];
   const close: number[] = [];
-  klines.map((t: number[]) => {
+  klines.map((t) => {
     time_.push(new Date(t[0]).toLocaleString());
-    close.push(t[4]);
+    close.push(Number(t[4]));
     // let [time, open, high, low, close, volume, closeTime, assetVolume, trades, buyBaseVolume, buyAssetVolume, ignored] = t;
     return t;
   });
@@ -91,20 +75,57 @@ async function createIndicators(klines) {
   return { time_, close, macd, sma };
 }
 
+// async function createIndicators2(klinesWorker: IndicatorsWorker) {
+//   const closePrice = klinesWorker.closePrice;
+//   const macd = new MacdSpecification(12, 20, 9);
+//   await macd.calculate(closePrice);
+
+//   const indicatorsWorker = new IndicatorWorker();
+//   const indicators = indicatorsWorker.buildIndicators([macd]);
+//   return indicators;
+// }
+
+const prepareSignalsMsg = (pair, timeframe, close, time_, indicators) => {
+  return {
+    pair,
+    timeframe,
+    close,
+    time_,
+    ...indicators
+  };
+};
+
 const readIndicatorsQueue = () => {
   transportWorker.consume(QUEUE, async function (msg) {
     const { pair, timeframe, klines } = JSON.parse(
       msg.content.toString()
     ) as IndicatorsQueueMsg;
-    console.log("INDICATOR MSG", pair, timeframe);
-    const indicators = await createIndicators(klines);
-    const { time_, close, macd, sma } = indicators;
-    transportWorker.sendToQueue("signals", {
+    console.log("INDICATOR", pair, timeframe);
+    const klinesWorker = await new IndicatorsWorker(klines).prepare();
+    const macdSpec = await new MacdSpecification(12, 20, 9);
+    const sma = await new SmaSpecification(200);
+    const indicators = await klinesWorker.calculate([macdSpec, sma]);
+    const close = klinesWorker.closePrice;
+    const time_ = klinesWorker.closeTime;
+    // const indicators = await createIndicators(klines);
+    // const indicators2 = await createIndicators2(klinesWorker);
+    // const { time_, close, macd, sma } = indicators;
+    const signalsMsg = prepareSignalsMsg(
       pair,
       timeframe,
+      close,
+      time_,
+      indicators
+    );
+
+    const dbInfo = {
+      time_,
+      close,
       ...indicators
-    });
-    dbWorker.saveIndicators(timeframe, pair, indicators);
+    };
+
+    transportWorker.sendToQueue("signals", signalsMsg);
+    dbWorker.saveIndicators(timeframe, pair, dbInfo);
   });
 };
 

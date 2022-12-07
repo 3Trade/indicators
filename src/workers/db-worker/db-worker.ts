@@ -22,6 +22,10 @@ export class DBWorker {
     return "done.";
   }
 
+  async deleteCollection(collectionName: string) {
+    this.db.getCollection(collectionName).deleteMany({});
+  }
+
   async saveIndicators(timeframe, pair, indicators) {
     console.log("Saving to indicators db");
 

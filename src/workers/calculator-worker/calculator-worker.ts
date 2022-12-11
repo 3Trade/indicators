@@ -23,8 +23,10 @@ export class CalculatorWorker {
 
   async sma(close: number[]) {
     let ma;
+    const output_cut = tulind.indicators.sma.start([200]);
     tulind.indicators.sma.indicator([close], [200], function (err, results) {
       ma = results[0];
+      output_cut;
     });
     return ma;
   }

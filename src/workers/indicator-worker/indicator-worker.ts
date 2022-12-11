@@ -25,14 +25,20 @@ export class SmaSpecification extends Indicator {
     super();
     this.period = period;
   }
+
+  outputCut() {
+    return tulind.indicators.sma.start([200]);
+  }
+
   async calculate(klinesWorker: IndicatorsWorker) {
     return new Promise<number[]>(async (resolve, reject) => {
       tulind.indicators.sma.indicator(
         [klinesWorker.closePrice],
         [this.period],
         function (err, results) {
-          resolve(results[0]);
-        }
+          const output = Array(this.outputCut()).fill(null).concat(results[0]);
+          resolve(output);
+        }.bind(this)
       );
     });
   }
@@ -65,15 +71,15 @@ export class MacdSpecification extends Indicator {
       macd_signal: number[];
       macd_histogram: number[];
     }>(async (resolve, reject) => {
+      const cut = this.outputCut();
       tulind.indicators.macd.indicator(
         [klinesWorker.closePrice],
         [this.short, this.long, this.signal],
         function (err, results) {
           const output = {
-            macd: results[0],
-            macd_signal: results[1],
-            macd_histogram: results[2],
-            output_cut: this.outputCut()
+            macd: Array(cut).fill(null).concat(results[0]),
+            macd_signal: Array(cut).fill(null).concat(results[1]),
+            macd_histogram: Array(cut).fill(null).concat(results[2])
           };
           this.output = output;
           resolve(output);
